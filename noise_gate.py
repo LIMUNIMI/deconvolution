@@ -6,21 +6,12 @@ rumore di fondo percepito nei tratti silenziosi/di decadimento
 dell'output de-riverberato — senza toccare i passaggi dove c'e'
 segnale reale.
 
-Motivazione
------------
-Abbiamo verificato (check_rir_noise_floor.py, check_dry_noise_floor.py,
-ascolto diretto) che il fruscio percepito non deriva da un difetto del
-filtro di dereverberazione, ma da rumore di fondo gia' presente nella
-sorgente/RIR, reso udibile nei tratti silenziosi per mancanza di
-mascheramento (es. la coda di una nota sostenuta di viola).
 
 Questo modulo non "toglie" rumore in senso stretto — attenua
 automaticamente il segnale quando il suo livello scende sotto una
 soglia (quindi nei tratti silenziosi/decadimento), lasciando intatti i
 passaggi con segnale reale. E' una tecnica standard in produzione audio
-(gate/espansore), qui applicata come post-processing mirato al problema
-osservato.
-
+(gate/espansore), qui applicata come post-processing.
 Parametri chiave
 -----------------
 threshold_db : sotto questo livello (relativo al picco del file) il
@@ -55,9 +46,6 @@ def _smooth_gain_attack_release(gain_db: np.ndarray, fs: int,
                                  attack_ms: float, release_ms: float) -> np.ndarray:
     """
     Smoothing temporale asimmetrico (attack/release) del guadagno in dB.
-    Standard nei compressori/gate audio: il guadagno si muove piu'
-    velocemente verso l'alto (attack, gate che si apre) che verso il
-    basso (release, gate che si chiude), per evitare artefatti.
     """
     N = len(gain_db)
     coeff_attack = np.exp(-1.0 / (max(attack_ms, 0.01) / 1000.0 * fs))
@@ -90,7 +78,7 @@ def _gate_curve(env_db: np.ndarray, threshold_db: float,
     gain_db[above] = 0.0
     if np.any(knee):
         frac = (env_db[knee] - lo) / max(knee_db, 1e-6)
-        # Transizione a coseno (piu' morbida di una lineare)
+        # Transizione a coseno
         smooth_frac = 0.5 - 0.5 * np.cos(np.pi * frac)
         gain_db[knee] = -range_db * (1.0 - smooth_frac)
     return gain_db
@@ -114,8 +102,7 @@ def apply_noise_gate(
     diversi.
 
     Se return_gain=True, ritorna anche la curva di guadagno applicata
-    (in dB, canale 0), utile per generare grafici diagnostici che
-    mostrano quando/quanto il gate interviene.
+    (in dB, canale 0).
     """
     x = np.asarray(audio, dtype=np.float64)
     single_channel = x.ndim == 1
