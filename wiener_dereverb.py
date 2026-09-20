@@ -47,30 +47,7 @@ def build_wiener_filter(
     adaptive_beta: bool = False,
     post_window_cap_ms: float = 2000.0,
 ):
-    """
-    NOVITA' — post_window_cap_ms (era un tetto FISSO di 250ms, nascosto)
-    ------------------------------------------------------------------
-    In precedenza la riga
-        post = int(min(post_ms, 250) * fs / 1000.0)
-    troncava SEMPRE la finestra temporale del filtro a 250ms dopo il
-    picco, indipendentemente dal valore di post_ms passato (anche se
-    auto_wiener_params calcolava fino a 1200ms in base al T60 stimato).
-
-    Con T60 tipici di 600-1600ms in questo dataset, il filtro poteva
-    quindi "vedere" e correggere solo i primi 250ms di coda riverberata
-    — una frazione piccola del riverbero reale, il che spiega perche'
-    il timbro resta intatto (il filtro tocca poco) ma il riverbero
-    percepito si riduce solo minimamente (la maggior parte della coda
-    non viene mai considerata dal filtro).
-
-    Ora il tetto e' un parametro esplicito (post_window_cap_ms, default
-    2000ms = 2s, abbastanza per coprire i T60 osservati). Se serve
-    ancora piu' margine per RIR molto riverberanti, aumentare questo
-    valore. Attenzione: finestre piu' lunghe possono aumentare il
-    rischio di artefatti/instabilita' del filtro inverso — vale la
-    pena confrontare i risultati (con validated_metrics.py) prima e
-    dopo per verificare che l'effetto sia netto positivo.
-    """
+    
     rir_proc = np.asarray(rir_proc, dtype=np.float64)
     H = np.fft.rfft(rir_proc, n=n_fft)
     freqs = np.fft.rfftfreq(n_fft, 1.0/fs)
