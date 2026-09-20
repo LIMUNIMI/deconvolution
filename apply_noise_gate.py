@@ -10,8 +10,6 @@ Uso:
     py apply_noise_gate.py --in_dir dereverb_out_test2/wiener --out_dir dereverb_out_gated/wiener \
         --threshold_db -40 --range_db 18 --release_ms 300
 
-Dopo aver trovato dei parametri che funzionano bene su un file di
-prova, rilancialo sull'intera cartella per generare tutti i file.
 """
 
 from __future__ import annotations
