@@ -6,7 +6,7 @@ Implements two filter variants (stationary and short-time, STFT) and an
 optional post-processing stage (noise gate) to reduce residual background
 noise in silent/decay portions of the signal.
 
-Developed as part of a bachelor's thesis in Music Informatics.
+Developed as part of a bachelor's thesis in Music Informatics(L-31).
 
 ## What it does
 
