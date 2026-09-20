@@ -43,14 +43,7 @@ def to_mono_rir(h):
     la media, mediando componenti in controfase, attenua naturalmente
     le risonanze piu' nette della stanza, che il canale singolo lascia
     invece intatte e piu' problematiche da invertire per il filtro di
-    Wiener). Questa scelta e la sua motivazione sono documentate nel
-    Capitolo 5 della tesi come limite noto della costruzione del
-    dataset.
-
-    IMPORTANTE: main.py deve usare la STESSA convenzione (media, non
-    canale di ampiezza massima) quando carica la RIR per progettare il
-    filtro, altrimenti la RIR "dentro" il wet e quella usata dal filtro
-    tornano ad essere disallineate.
+    Wiener).
     """
     if len(h.shape) > 1:
         return np.mean(h, axis=1)
