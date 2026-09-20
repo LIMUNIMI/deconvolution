@@ -36,7 +36,7 @@ from noise_gate import apply_noise_gate
 
 
 # ============================
-# MENU INTERATTIVO (le uniche due domande)
+# MENU INTERATTIVO 
 # ============================
 
 def ask_path(prompt: str) -> Path:
@@ -206,7 +206,7 @@ def process_one(in_path: Path, rir_mono: np.ndarray, sr_rir: int,
 
     # --- sincronizzazione: attiva di default, disattivabile con --no_sync
     #     per chi sa gia' che il wet nasce da convoluzione diretta con
-    #     questa RIR (es. materiale generato con convolvi.py) ---
+    #     questa RIR (es. materiale generato con conv.py) ---
     if not args.no_sync:
         sync_offset = find_direct_path_offset(x_rs[:, 0], rir_rs, fs)
         if sync_offset > 0:
@@ -264,7 +264,7 @@ def main():
     parser = build_parser()
     args   = parser.parse_args()
 
-    # --- le uniche due domande: se non passate da CLI, si chiedono a menu ---
+    # --- se non passate da CLI, si chiedono a menu ---
     if args.input and args.rir:
         input_path = Path(clean_path(args.input))
         rir_path   = Path(clean_path(args.rir))
@@ -285,10 +285,7 @@ def main():
 
     rir_x, sr_rir = load_audio(rir_path)
     if rir_x.ndim > 1 and rir_x.shape[1] > 1:
-        # media dei canali, NON canale di ampiezza massima: deve essere
-        # la stessa convenzione usata in Conv.py per generare il wet,
-        # altrimenti la RIR "dentro" il wet e quella usata dal filtro
-        # tornano ad essere disallineate (vedi nota in Conv.py)
+        # media dei canali, NON canale di ampiezza massima
         print(f"[INFO] RIR multicanale ({rir_x.shape[1]} ch), uso media dei canali")
         rir_mono = np.mean(rir_x, axis=1)
     else:
