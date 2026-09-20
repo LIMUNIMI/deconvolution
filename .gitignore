@@ -1,0 +1,51 @@
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# === Editor / OS ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# === Audio e dati (personali, pesanti, o non destinati a distribuzione) ===
+# I dataset usati per la tesi (dataset di validazione con ground truth,
+# registrazioni reali, RIR misurate) non sono inclusi nel repository:
+# alcuni sono materiale di terzi con proprie condizioni di distribuzione
+# (dataset PAN-AR, dataset OpenAIR), altri sono registrazioni personali.
+# Chi clona il repository userà i propri file audio.
+*.wav
+*.mp3
+*.flac
+ground_truth/
+Rec_strumenti/
+RIR_OUT/
+
+# === Output generati dagli script (rigenerabili, non da versionare) ===
+dereverb_out*/
+dereverb_plots*/
+gate_plots/
+eval_plots/
+eval_reali_plots/
+wet_generati/
+*.csv
+
+# === Script e materiale riservato alla tesi (non parte dello strumento pubblico) ===
+# Script di analisi/verifica scientifica usati per la validazione dei
+# risultati riportati nella tesi, non pensati come strumento riusabile:
+evaluate.py
+evaluate_reale.py
+validated_metrics.py
+significance_test.py
+check_dry_noise_floor.py
+check_rir_noise_floor.py
+diagnose_subbass.py
+debug_eq_correction.py
+rir_eq_correction.py
+rir_media.py
+batch_eval.py
+utils_audio.py
