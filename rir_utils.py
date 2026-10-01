@@ -5,6 +5,32 @@ from scipy.signal.windows import tukey
 
 
 # ============================
+# RIDUZIONE A MONO DELLA RIR (convenzione condivisa)
+# ============================
+
+def rir_to_mono(rir: np.ndarray, mode: str = "mean") -> np.ndarray:
+    """
+    Riduce una RIR multicanale a un solo canale.
+
+    Questa funzione e' usata SIA da Conv.py (generazione del wet) SIA da
+    main.py (costruzione del filtro): in questo modo la RIR contenuta nel
+    segnale e quella usata dal filtro sono sempre ridotte nello stesso modo.
+
+    mode = "mean": media aritmetica dei canali (convenzione usata finora).
+    mode = "w"   : solo il canale 0. Nel formato AmbiX (ordinamento ACN) il
+                   canale 0 e' W, la componente omnidirezionale.
+    """
+    rir = np.asarray(rir, dtype=np.float64)
+    if rir.ndim == 1 or rir.shape[1] == 1:
+        return rir.reshape(-1)
+    if mode == "mean":
+        return np.mean(rir, axis=1)
+    if mode == "w":
+        return rir[:, 0]
+    raise ValueError(f"rir_mono non valido: {mode!r} (usa 'mean' o 'w')")
+
+
+# ============================
 # PRE-PROCESSING DELLA RIR
 # ============================
 
@@ -17,9 +43,6 @@ def prepare_rir(
     pre_peak_ms: float = 4.0
 ) -> tuple[np.ndarray, int]:
     """
-    - make_causal ora conserva pre_peak_ms millisecondi PRIMA del picco,
-      invece di tagliare esattamente sul picco. Tagliare sul picco rimuove
-      l'onset del suono diretto e introduce discontinuità che generano ringing.
 
     Prepara una RIR reale per l'inversione:
 
@@ -27,7 +50,8 @@ def prepare_rir(
     2) Allineamento al direct-path (picco massimo)
     3) (Opzionale) causalizzazione: taglia la parte prima del direct-path (riduce pre-echo)
     4) Troncamento della coda (stabilità numerica e percettiva)
-    5) Finestra Tukey (riduce ringing dovuto a taglio netto)
+    5) Fade-out (meta' di finestra di Tukey) SOLO sulla coda, per evitare
+       il taglio netto senza attenuare il suono diretto
     """
     rir = np.asarray(rir, dtype=np.float64).copy()
     rir = rir - np.mean(rir)
@@ -50,7 +74,10 @@ def prepare_rir(
     else:
         rir = rir[:L]
 
-    w = tukey(len(rir), alpha=tukey_alpha)
+    w = np.ones(len(rir))
+    n_fade = int(len(rir) * tukey_alpha / 2)
+    if n_fade > 1:
+        w[-n_fade:] = tukey(2 * n_fade, alpha=1.0)[n_fade:]
     rir_proc = rir * w
 
     return rir_proc, peak_idx
@@ -71,7 +98,6 @@ def drr_from_rir_db(rir_proc: np.ndarray, fs: int, early_ms: float = 100.0) -> f
 def estimate_t60(rir: np.ndarray, fs: int) -> float:
     """
     Stima T60 via integrale di Schroeder (metodo T20 estrapolato).
-    Robusto anche con RIR rumorose o troncate.
     """
     h2 = rir ** 2
     peak_idx = int(np.argmax(np.abs(rir)))
@@ -111,8 +137,7 @@ def find_direct_path_offset(wet: np.ndarray, rir: np.ndarray, fs: int,
                              search_ms: float = 100.0) -> int:
     """
     Trova l'offset del suono diretto tramite cross-correlazione tra
-    il segnale wet e la RIR. Più robusto di argmax(|rir|) per RIR
-    rumorose o con riflessioni precoci più forti del diretto.
+    il segnale wet e la RIR.
     
     Cerca il picco solo nei primi search_ms millisecondi per evitare
     di trovare riflessioni tardive.
@@ -132,31 +157,20 @@ def find_direct_path_offset(wet: np.ndarray, rir: np.ndarray, fs: int,
 
 
 def auto_wiener_params(rir_raw: np.ndarray, fs: int) -> dict:
-    """
-    Stima T60 e DRR dalla RIR grezza e restituisce parametri ottimali
-    per build_wiener_filter e prepare_rir.
-
-    Logica:
-    - trunc_s: copre almeno T20 (T60/3), mai meno di 0.2s né più di 2.0s
-    - beta_rel: sale quando DRR è basso (ambiente difficile) e quando T60 è lungo
-    - post_ms: proporzionale a T60, per catturare abbastanza risposta del filtro inverso
-    """
     t60 = estimate_t60(rir_raw, fs)
     drr = estimate_drr(rir_raw, fs)
 
     print(f"[AUTO] T60 stimato: {t60*1000:.0f} ms | DRR stimato: {drr:+.1f} dB")
 
-    # trunc_s: copre T20 = T60/3, con margini
+   
     trunc_s = float(np.clip(t60 / 3.0, 0.2, 2.0))
 
-    # beta_rel: regolarizzazione adattiva
-    # base = 0.05 (ambienti facili, DRR > 6dB)
-    # sale fino a 0.4 per DRR < -3dB e T60 lungo
+    
     drr_factor = np.clip(1.0 + (-drr) / 10.0, 1.0, 4.0)   # >1 quando DRR < 0
     t60_factor  = np.clip(t60 / 0.5, 1.0, 3.0)              # >1 quando T60 > 0.5s
     beta_rel = float(np.clip(0.05 * drr_factor * t60_factor, 0.03, 0.5))
 
-    # post_ms: almeno 3× trunc_s in ms, max 1200ms
+    
     post_ms = float(np.clip(trunc_s * 3000, 200, 1200))
 
     return {
