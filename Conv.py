@@ -1,120 +1,98 @@
-import os
+"""
+Conv.py
+=======
+Genera il dataset di validazione: convolve ogni segnale anecoico (dry)
+con ogni RIR e salva il segnale riverberato (wet).
+
+Scelte, tutte allineate con main.py:
+- frequenza di campionamento unica a 48 kHz per tutti i file;
+- RIR ridotta a mono con la stessa regola di main.py (opzione --rir_mono,
+  che deve avere lo stesso valore nei due script);
+- dry multicanale: canale 0, come in evaluate.py e validated_metrics.py,
+  cosi' il riferimento usato per le metriche e' esattamente il segnale
+  che e' stato convoluto;
+- RIR normalizzata in energia e tagliata al picco del suono diretto;
+- wet normalizzato al picco (0.9) e salvato in PCM a 16 bit.
+"""
+
+import argparse
+import re
+from math import gcd
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
 from scipy.signal import fftconvolve, resample_poly
-from math import gcd
 
-
-# === CARTELLE ===
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-ANECHOIC_DIR = os.path.join(BASE_DIR, "anechoic")
-RIR_DIR = os.path.join(BASE_DIR, "rir")
-OUTPUT_DIR = os.path.join(BASE_DIR, "reverberated")
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Frequenza di campionamento unica per TUTTI i file in uscita, indipendente
-# dalla frequenza nativa dei singoli file dry/RIR di partenza (Cap.4 della
-# tesi assume un dataset uniformemente a 48kHz).
 TARGET_SR = 48000
+BASE_DIR = Path(__file__).resolve().parent.parent      # ...\ground_truth
 
 
-def to_mono_dry(x):
-    """Per i segnali anecoici (dry): media dei canali se multicanale.
-    Adatto qui perche' i dry non sono Ambisonics, un'eventuale media
-    tra due canali stereo non pone gli stessi problemi di fase
-    distruttiva di un B-format a 9 canali (vedi to_mono_rir)."""
-    if len(x.shape) > 1:
-        return np.mean(x, axis=1)
-    return x
-
-
-def to_mono_rir(h):
-    """Per le RIR Ambisonics B-format (multicanale): media dei canali.
-
-    NOTA METODOLOGICA: la media aritmetica dei canali Ambisonics non e'
-    tecnicamente il modo piu' rigoroso di ridurre un B-format a un
-    singolo canale (i canali rappresentano componenti spaziali diverse,
-    con possibili cancellazioni di fase tra loro). E' stata comunque
-    preferita alla selezione del canale di ampiezza massima, verificata
-    sperimentalmente, perche' quest'ultima produceva una colorazione
-    metallica udibile sull'output de-riverberato (probabilmente perche'
-    la media, mediando componenti in controfase, attenua naturalmente
-    le risonanze piu' nette della stanza, che il canale singolo lascia
-    invece intatte e piu' problematiche da invertire per il filtro di
-    Wiener).
-    """
-    if len(h.shape) > 1:
-        return np.mean(h, axis=1)
-    return h
-
-
-def normalize(x):
-    peak = np.max(np.abs(x))
-    if peak > 0:
-        x = x / peak * 0.9
-    return x
+def rir_to_mono(rir: np.ndarray, mode: str = "mean") -> np.ndarray:
+    
+    rir = np.asarray(rir, dtype=np.float64)
+    if rir.ndim == 1 or rir.shape[1] == 1:
+        return rir.reshape(-1)
+    if mode == "mean":
+        return np.mean(rir, axis=1)
+    if mode == "w":
+        return rir[:, 0]
+    raise ValueError(f"rir_mono non valido: {mode!r} (usa 'mean' o 'w')")
 
 
 def resample_audio(x, sr_in, sr_out):
-    """Resampling con resample_poly"""
     if sr_in == sr_out:
         return x
-
     g = gcd(sr_in, sr_out)
-    up = sr_out // g
-    down = sr_in // g
-
-    x_resampled = resample_poly(x, up, down)
-    return x_resampled
+    return resample_poly(x, sr_out // g, sr_in // g)
 
 
-def process():
-    for audio_file in os.listdir(ANECHOIC_DIR):
-        if not audio_file.endswith(".wav"):
-            continue
+def rir_subfolder(rir_path: Path) -> str:
+    m = re.match(r"(\d+)", rir_path.stem)
+    return f"rir{m.group(1)}" if m else rir_path.stem
 
-        x, sr_x = sf.read(os.path.join(ANECHOIC_DIR, audio_file))
-        x = to_mono_dry(x)
 
-        # === RESAMPLING DRY -> TARGET_SR (sempre, indipendentemente
-        #     dalla frequenza nativa del file) ===
-        if sr_x != TARGET_SR:
-            print(f"Resampling dry {audio_file}: {sr_x} → {TARGET_SR}")
-            x = resample_audio(x, sr_x, TARGET_SR)
+def main():
+    p = argparse.ArgumentParser(description="Genera i segnali wet del dataset di validazione")
+    p.add_argument("--dry_dir", default=str(BASE_DIR / "dry"))
+    p.add_argument("--rir_dir", default=str(BASE_DIR / "rir"))
+    p.add_argument("--out_dir", default=str(BASE_DIR / "reverberated_v2"),
+                   help="Cartella di output (nuova, per non sovrascrivere i wet esistenti)")
+    p.add_argument("--rir_mono", choices=["mean", "w"], default="mean",
+                   help="Deve coincidere con --rir_mono di main.py")
+    args = p.parse_args()
 
-        for rir_file in os.listdir(RIR_DIR):
-            if not rir_file.endswith(".wav"):
-                continue
+    dry_files = sorted(Path(args.dry_dir).glob("*.wav"))
+    rir_files = sorted(Path(args.rir_dir).glob("*.wav"))
+    print(f"[INFO] dry: {args.dry_dir} ({len(dry_files)} file)")
+    print(f"[INFO] RIR: {args.rir_dir} ({len(rir_files)} file), riduzione a mono: {args.rir_mono}")
+    print(f"[INFO] output: {args.out_dir}\n")
+    if not dry_files or not rir_files:
+        raise RuntimeError("Nessun file .wav trovato: controlla --dry_dir e --rir_dir")
 
-            h, sr_h = sf.read(os.path.join(RIR_DIR, rir_file))
-            h = to_mono_rir(h)
+    for rir_path in rir_files:
+        h, sr_h = sf.read(rir_path, always_2d=True)
+        h = rir_to_mono(h, args.rir_mono)
+        h = resample_audio(h, sr_h, TARGET_SR)
+        h = h / np.sqrt(np.sum(h ** 2))          # normalizzazione in energia
+        h = h[np.argmax(np.abs(h)):]              # taglio al suono diretto
 
-            # === RESAMPLING RIR -> TARGET_SR (sempre) ===
-            if sr_h != TARGET_SR:
-                print(f"Resampling RIR {rir_file}: {sr_h} → {TARGET_SR}")
-                h = resample_audio(h, sr_h, TARGET_SR)
+        out_dir = Path(args.out_dir) / rir_subfolder(rir_path)
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-            # normalizzazione RIR
-            h = h / np.sqrt(np.sum(h**2))
+        for dry_path in dry_files:
+            x, sr_x = sf.read(dry_path, always_2d=True)
+            x = resample_audio(x[:, 0], sr_x, TARGET_SR)
 
-            # allineamento direct path
-            h = h[np.argmax(np.abs(h)):]
-
-            # convoluzione
             y = fftconvolve(x, h, mode="full")
+            y = y / np.max(np.abs(y)) * 0.9
 
-            # normalizzazione output
-            y = normalize(y)
+            out_path = out_dir / f"{dry_path.stem}_{rir_path.stem}.wav"
+            sf.write(out_path, y, TARGET_SR, subtype="PCM_16")
+            print(f"  {out_dir.name}\\{out_path.name}")
 
-            out_name = f"{audio_file[:-4]}_{rir_file[:-4]}.wav"
-            out_path = os.path.join(OUTPUT_DIR, out_name)
-
-            sf.write(out_path, y, TARGET_SR)
-
-            print("Creato:", out_name)
+    print(f"\nFine. Elabora i wet con main.py usando --no_sync --rir_mono {args.rir_mono}")
 
 
 if __name__ == "__main__":
-    process()
+    main()
