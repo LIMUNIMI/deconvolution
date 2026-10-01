@@ -8,17 +8,13 @@ della cartella audio da elaborare, e il percorso della RIR
 dell'ambiente. Nessun'altra domanda, nessuna assunzione sul naming
 dei file, nessuna logica di convoluzione qui dentro.
 
-Chi desidera costruirsi un proprio set di test con ground truth
-(convolvendo un segnale anecoico con una RIR) deve usare lo script
-separato convolvi.py — main.py de-riverbera soltanto quello che gli
-viene dato, cosi' com'e'.
-
 Uso base (interattivo):
     py main.py
 
 Uso avanzato (per chi vuole controllare i parametri sperimentali,
 es. per riprodurre il dataset di validazione della tesi):
-    py main.py --no_sync --no_auto --beta_rel 0.1 --plots --plot_dir out_plots
+    py main.py --no_auto --beta_rel 0.1 --plots --plot_dir out_plots
+    py main.py --max_anticausal_ms 150     (limita il pre-eco con RIR misurate)
 """
 
 from __future__ import annotations
@@ -28,7 +24,7 @@ import argparse
 from pathlib import Path
 
 from io_utils import clean_path, load_audio, resample_multichannel, save_audio
-from rir_utils import prepare_rir, drr_from_rir_db, auto_wiener_params, find_direct_path_offset
+from rir_utils import prepare_rir, drr_from_rir_db, auto_wiener_params, find_direct_path_offset, rir_to_mono
 from wiener_dereverb import dereverb_wiener, apply_low_shelf_boost
 from wiener_stft import dereverb_wiener_stft
 from plot_utils import save_analysis_plots
@@ -36,7 +32,7 @@ from noise_gate import apply_noise_gate
 
 
 # ============================
-# MENU INTERATTIVO 
+# MENU INTERATTIVO
 # ============================
 
 def ask_path(prompt: str) -> Path:
@@ -78,11 +74,15 @@ def build_parser():
     p.add_argument("--out_dir", default="dereverb_out",
                    help="Cartella radice di output")
 
+    p.add_argument("--sync", action="store_true", default=False,
+                   help="Attiva il taglio iniziale del segnale stimato per "
+                        "cross-correlazione con la testa della RIR. Disattivato di "
+                        "default: il filtro e' tempo-invariante e non richiede "
+                        "allineamento, e su registrazioni musicali il taglio rimuove "
+                        "parte del segnale (vedi Cap. 4).")
     p.add_argument("--no_sync", action="store_true", default=False,
-                   help="Disattiva la sincronizzazione automatica wet/RIR. "
-                        "Usalo solo se sai che il wet nasce gia' da una "
-                        "convoluzione diretta con questa RIR (es. materiale "
-                        "generato con convolvi.py).")
+                   help="Mantenuto per compatibilita' con i comandi precedenti: "
+                        "la sincronizzazione e' gia' disattivata di default.")
     p.add_argument("--no_auto", action="store_true", default=False,
                    help="Disabilita la stima automatica dei parametri dalla RIR "
                         "(T60/DRR -> trunc_s/beta_rel/post_ms). Default: attiva.")
@@ -102,6 +102,10 @@ def build_parser():
     p.add_argument("--rir_trunc_s",  type=float, default=0.8)
     p.add_argument("--tukey_alpha",  type=float, default=0.25)
     p.add_argument("--no_causal",    action="store_true")
+    p.add_argument("--rir_mono", choices=["mean", "w"], default="mean",
+                   help="Riduzione a mono della RIR multicanale: 'mean' = media dei "
+                        "canali, 'w' = canale 0 (W, omnidirezionale in AmbiX). "
+                        "Deve coincidere con quella usata in Conv.py.")
 
     # Parametri filtro di Wiener
     p.add_argument("--beta_rel",  type=float, default=0.15)
@@ -121,6 +125,19 @@ def build_parser():
     p.add_argument("--pre_ms",    type=float, default=15.0)
     p.add_argument("--post_ms",   type=float, default=600.0)
     p.add_argument("--post_window_cap_ms", type=float, default=2000.0)
+    p.add_argument("--max_anticausal_ms", type=float, default=0.0,
+                   help="Limita la parte anticausale del filtro inverso a questo numero "
+                        "di millisecondi prima dell'istante corrente (0 = nessun limite). "
+                        "Riduce il pre-eco quando la RIR misurata non coincide esattamente "
+                        "con quella della registrazione, al prezzo di una de-riverberazione "
+                        "meno efficace (vedi Cap. 5). Esempio: 150.")
+    p.add_argument("--time_window", action="store_true", default=False,
+                   help="Applica una finestra temporale alla risposta del filtro "
+                        "(disattivata di default: tronca il filtro inverso e ne "
+                        "annulla l'effetto, vedi Cap. 5).")
+    p.add_argument("--shelf_db", type=float, default=10.0,
+                   help="Guadagno dell'EQ low-shelf sotto i 350 Hz in post-processing "
+                        "(0 = disattivato).")
 
     # Parametri STFT
     p.add_argument("--stft_n_fft",   type=int,   default=2048)
@@ -145,12 +162,13 @@ def build_parser():
 # POST-PROCESSING COMUNE
 # ============================
 
-def postprocess(dry: np.ndarray, x_rs: np.ndarray, fs: int) -> np.ndarray:
+def postprocess(dry: np.ndarray, x_rs: np.ndarray, fs: int, shelf_db: float = 10.0) -> np.ndarray:
     """Normalizzazione RMS + EQ compensativo low-shelf (Cap.4 Sez.4.3.6)."""
     rms_in  = np.sqrt(np.mean(x_rs[:, 0] ** 2))
     rms_out = np.sqrt(np.mean(dry[:, 0] ** 2)) + 1e-12
     dry    *= rms_in / rms_out
-    dry     = apply_low_shelf_boost(dry, fs, f0=350.0, gain_db=10.0)
+    if shelf_db != 0.0:
+        dry = apply_low_shelf_boost(dry, fs, f0=350.0, gain_db=shelf_db)
     return dry
 
 
@@ -204,10 +222,10 @@ def process_one(in_path: Path, rir_mono: np.ndarray, sr_rir: int,
         beta_rel *= args.beta_scale
         print(f"  [SCALE] beta_rel {beta_rel_prima:.3f} -> {beta_rel:.3f} (x{args.beta_scale})")
 
-    # --- sincronizzazione: attiva di default, disattivabile con --no_sync
-    #     per chi sa gia' che il wet nasce da convoluzione diretta con
-    #     questa RIR (es. materiale generato con conv.py) ---
-    if not args.no_sync:
+    # --- sincronizzazione: disattivata di default (opzione --sync). Il filtro
+    #     e' lineare e tempo-invariante: non serve allineare il segnale alla
+    #     RIR, e il taglio iniziale rimuoverebbe parte della registrazione ---
+    if args.sync and not args.no_sync:
         sync_offset = find_direct_path_offset(x_rs[:, 0], rir_rs, fs)
         if sync_offset > 0:
             print(f"  [SYNC] offset diretto: {sync_offset/fs*1000:.1f}ms — wet allineato alla RIR")
@@ -229,12 +247,17 @@ def process_one(in_path: Path, rir_mono: np.ndarray, sr_rir: int,
         beta_max=args.beta_max, delay_ms=args.delay_ms, f_lo=args.f_lo,
         f_hi=args.f_hi, gmax_db=args.gmax_db, pre_ms=args.pre_ms,
         post_ms=post_ms, post_window_cap_ms=args.post_window_cap_ms,
+        time_window=args.time_window,
     )
+    if args.max_anticausal_ms > 0:
+        # finestra solo sul lato anticausale: il lato causale resta illimitato
+        wiener_kwargs.update(time_window=True, pre_ms=args.max_anticausal_ms,
+                             post_ms=1e5, post_window_cap_ms=1e5)
     hop_stft = max(1, int(args.stft_n_fft * (1.0 - args.stft_overlap)))
     safe_stem = in_path.stem.replace("-", "_")
 
     dry_stat, dbg_stat = dereverb_wiener(audio=x_rs, rir_proc=rir_proc, fs=fs, **wiener_kwargs)
-    dry_stat = postprocess(dry_stat, x_rs, fs)
+    dry_stat = postprocess(dry_stat, x_rs, fs, args.shelf_db)
     path_stat = out_stat / f"{in_path.stem}_wiener_dereverb.wav"
     save_audio(path_stat, dry_stat, fs, float_out=args.float_out)
     print(f"  [wiener]      → {path_stat.name}")
@@ -246,7 +269,7 @@ def process_one(in_path: Path, rir_mono: np.ndarray, sr_rir: int,
     dry_stft, dbg_stft = dereverb_wiener_stft(audio=x_rs, rir_proc=rir_proc, fs=fs,
                                                n_fft_stft=args.stft_n_fft, hop=hop_stft,
                                                **wiener_kwargs)
-    dry_stft = postprocess(dry_stft, x_rs, fs)
+    dry_stft = postprocess(dry_stft, x_rs, fs, args.shelf_db)
     path_stft = out_stft / f"{in_path.stem}_wiener_stft_dereverb.wav"
     save_audio(path_stft, dry_stft, fs, float_out=args.float_out)
     print(f"  [wiener_stft] → {path_stft.name}")
@@ -264,7 +287,7 @@ def main():
     parser = build_parser()
     args   = parser.parse_args()
 
-    # --- se non passate da CLI, si chiedono a menu ---
+    # --- le uniche due domande: se non passate da CLI, si chiedono a menu ---
     if args.input and args.rir:
         input_path = Path(clean_path(args.input))
         rir_path   = Path(clean_path(args.rir))
@@ -281,15 +304,14 @@ def main():
 
     print(f"\n[INFO] RIR:              {rir_path}")
     print(f"[INFO] File trovati:     {len(in_files)}")
-    print(f"[INFO] Sincronizzazione: {'disattiva (--no_sync)' if args.no_sync else 'attiva'}\n")
+    print(f"[INFO] Sincronizzazione: {'attiva (--sync)' if (args.sync and not args.no_sync) else 'disattiva'}\n")
 
     rir_x, sr_rir = load_audio(rir_path)
+    # Stessa funzione usata da Conv.py: la RIR contenuta nel wet e quella
+    # usata dal filtro devono essere ridotte a mono nello stesso modo.
     if rir_x.ndim > 1 and rir_x.shape[1] > 1:
-        # media dei canali, NON canale di ampiezza massima
-        print(f"[INFO] RIR multicanale ({rir_x.shape[1]} ch), uso media dei canali")
-        rir_mono = np.mean(rir_x, axis=1)
-    else:
-        rir_mono = rir_x.squeeze()
+        print(f"[INFO] RIR multicanale ({rir_x.shape[1]} ch), riduzione a mono: {args.rir_mono}")
+    rir_mono = rir_to_mono(rir_x, args.rir_mono)
 
     out_stat = Path(args.out_dir) / "wiener"
     out_stft = Path(args.out_dir) / "wiener_stft"
