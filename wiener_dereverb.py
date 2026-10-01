@@ -46,8 +46,8 @@ def build_wiener_filter(
     post_ms: float = 400,
     adaptive_beta: bool = False,
     post_window_cap_ms: float = 2000.0,
+    time_window: bool = False,
 ):
-    
     rir_proc = np.asarray(rir_proc, dtype=np.float64)
     H = np.fft.rfft(rir_proc, n=n_fft)
     freqs = np.fft.rfftfreq(n_fft, 1.0/fs)
@@ -58,8 +58,6 @@ def build_wiener_filter(
 
     if adaptive_beta:
         # Beta adattiva per banda: dove H² è alto → β più alto → G più conservativo
-        # Riduce il guadagno anomalo nelle bande ben rappresentate dalla RIR (es. mid)
-        # senza penalizzare le bande con H² basso (basse freq) dove β era già alto
         H2_norm = H2 / (np.mean(H2) + 1e-30)
         alpha   = 2.0
         beta_f  = beta0 * (1.0 + alpha * H2_norm)
@@ -81,23 +79,23 @@ def build_wiener_filter(
     mag  = np.abs(G)
     G *= np.minimum(1.0, gmax / np.maximum(mag, 1e-12))
 
+    
+    if time_window:
+        g = np.fft.irfft(G, n=n_fft)
+        t = np.arange(n_fft)
+        t = np.where(t < n_fft // 2, t, t - n_fft)
+        pre  = pre_ms * fs / 1000.0
+        post = min(post_ms, post_window_cap_ms) * fs / 1000.0
+        # esponenziali calcolati solo sul proprio lato (evita overflow numerici)
+        win  = np.empty(n_fft)
+        neg  = t < 0
+        win[neg]  = np.exp(t[neg] / max(pre / 3.0, 1.0))
+        win[~neg] = np.exp(-t[~neg] / max(post / 6.0, 1.0))
+        win[(t < -pre) | (t > post)] = 0.0
+        G = np.fft.rfft(g * win, n=n_fft)
+
     delay_samp = int((delay_ms / 1000.0) * fs)
     G *= np.exp(-1j * 2.0 * np.pi * freqs * (delay_samp / fs))
-
-    g = np.fft.irfft(G, n=n_fft)
-    pk   = int(np.argmax(np.abs(g)))
-    pre  = int(pre_ms * fs / 1000.0)
-    post = int(min(post_ms, post_window_cap_ms) * fs / 1000.0)
-    a, b = max(0, pk - pre), min(len(g), pk + post)
-    win  = np.zeros_like(g)
-    n_win = b - a
-    if n_win > 4:
-        t      = np.arange(n_win) - (pk - a)
-        tau    = max(post / 6.0, 1.0)
-        attack = np.where(t < 0,  np.exp( t / max(pre / 3.0, 1.0)), 1.0)
-        decay  = np.where(t >= 0, np.exp(-t / tau), 1.0)
-        win[a:b] = attack * decay
-    G = np.fft.rfft(g * win, n=n_fft)
 
     return {
         "H": H,
